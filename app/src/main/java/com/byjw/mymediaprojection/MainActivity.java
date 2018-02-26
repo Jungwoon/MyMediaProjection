@@ -24,7 +24,6 @@ import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Display;
 import android.view.OrientationEventListener;
-import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -41,20 +40,20 @@ public class MainActivity extends AppCompatActivity {
     private static int IMAGES_PRODUCED;
     private static final String SCREENCAP_NAME = "screencap";
     private static final int VIRTUAL_DISPLAY_FLAGS = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY | DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC;
-    private static MediaProjection sMediaProjection;
+    private static MediaProjection mediaProjection;
 
-    private MediaProjectionManager mProjectionManager;
-    private ImageReader mImageReader;
-    private Handler mHandler;
-    private Display mDisplay;
-    private VirtualDisplay mVirtualDisplay;
-    private int mDensity;
-    private int mWidth;
-    private int mHeight;
-    private int mRotation;
-    private OrientationChangeCallback mOrientationChangeCallback;
+    private MediaProjectionManager mediaProjectionManager;
+    private ImageReader imageReader;
+    private Handler handler;
+    private Display display;
+    private VirtualDisplay virtualDisplay;
+    private int density;
+    private int width;
+    private int height;
+    private int rotation;
+    private OrientationChangeCallback orientationChangeCallback;
 
-    private final String MAIN_PATH = android.os.Environment.getExternalStorageDirectory().toString() + "/Jungwoon2/";
+    private final String MAIN_PATH = android.os.Environment.getExternalStorageDirectory().toString() + "/Jungwoon4/";
 
     final int MY_PHONE_STATE_CODE = 1;
 
@@ -68,41 +67,112 @@ public class MainActivity extends AppCompatActivity {
         stopProjection();
     }
 
+    /****************************************** Activity Lifecycle methods ************************/
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        ButterKnife.bind(this);
+
+        // MediaProjectionManager 인스턴스 생성
+        mediaProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+
+        // start capture handling thread
+        new Thread() {
+            @Override
+            public void run() {
+                Looper.prepare();
+                handler = new Handler();
+                Looper.loop();
+            }
+        }.start();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 쓰기 권한이 없으면 Runtime Permission 요청
+        if (!checkPermissions()) requestPermissions();
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQUEST_CODE) {
+            mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data);
+
+            if (mediaProjection != null) {
+
+                File storeDirectory = new File(MAIN_PATH);
+                if (!storeDirectory.exists()) {
+                    boolean success = storeDirectory.mkdirs();
+                    if (!success) {
+                        Log.e(TAG, "failed to create file storage directory.");
+                        return;
+                    }
+                }
+
+                // display metrics
+                DisplayMetrics metrics = getResources().getDisplayMetrics();
+                density = metrics.densityDpi;
+                display = getWindowManager().getDefaultDisplay();
+
+                // create virtual display depending on device width / height
+                createVirtualDisplay();
+
+                // register orientation change callback
+                orientationChangeCallback = new OrientationChangeCallback(this);
+                if (orientationChangeCallback.canDetectOrientation()) {
+                    orientationChangeCallback.enable();
+                }
+
+                // MediaProjection의 상태 변경시 해당 알림을 수신하기 위한 리스너
+                mediaProjection.registerCallback(new MediaProjectionStopCallback(), handler);
+            }
+        }
+    }
+
+    /****************************************** Image Render **************************************/
+
     private class ImageAvailableListener implements ImageReader.OnImageAvailableListener {
         @Override
         public void onImageAvailable(ImageReader reader) {
             Image image = null;
-            FileOutputStream fos = null;
+            FileOutputStream fileOutputStream = null;
             Bitmap bitmap = null;
 
             try {
+                // 최신 이미지를 가져오는 부분
                 image = reader.acquireLatestImage();
                 if (image != null) {
                     Image.Plane[] planes = image.getPlanes();
                     ByteBuffer buffer = planes[0].getBuffer();
+
                     int pixelStride = planes[0].getPixelStride();
                     int rowStride = planes[0].getRowStride();
-                    int rowPadding = rowStride - pixelStride * mWidth;
+                    int rowPadding = rowStride - pixelStride * width;
 
                     // create bitmap
-                    bitmap = Bitmap.createBitmap(mWidth + rowPadding / pixelStride, mHeight, Bitmap.Config.ARGB_8888);
-                    bitmap.copyPixelsFromBuffer(buffer);
+                    // **여기서 width와 height를 조절하면 이미지 자르기 가능
+                    bitmap = Bitmap.createBitmap(width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888);
+                    bitmap.copyPixelsFromBuffer(buffer); // 버퍼로부터 이미지를 가져와 bitmap으로 만듭니다
 
-                    // write bitmap to a file
-                    fos = new FileOutputStream(MAIN_PATH + IMAGES_PRODUCED + ".png");
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, fos);
+                    // 위에서 생성한 bitmap을 png 파일로 만들어 줍니다
+                    fileOutputStream = new FileOutputStream(MAIN_PATH + IMAGES_PRODUCED + ".png");
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, fileOutputStream);
 
                     IMAGES_PRODUCED++;
                     Log.e(TAG, "captured image: " + IMAGES_PRODUCED);
                 }
-
-            } catch (Exception e) {
+            }
+            catch (Exception e) {
                 e.printStackTrace();
-            } finally {
-                if (fos != null) {
+            }
+            finally {
+                if (fileOutputStream != null) {
                     try {
-                        fos.close();
-                    } catch (IOException ioe) {
+                        fileOutputStream.close();
+                    }
+                    catch (IOException ioe) {
                         ioe.printStackTrace();
                     }
                 }
@@ -118,21 +188,21 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private class OrientationChangeCallback extends OrientationEventListener {
 
+    // 화면 전환일때의 처리
+    private class OrientationChangeCallback extends OrientationEventListener {
         OrientationChangeCallback(Context context) {
             super(context);
         }
 
         @Override
         public void onOrientationChanged(int orientation) {
-            final int rotation = mDisplay.getRotation();
-            if (rotation != mRotation) {
-                mRotation = rotation;
+            final int rotation = display.getRotation();
+            if (rotation != MainActivity.this.rotation) {
+                MainActivity.this.rotation = rotation;
                 try {
-                    // clean up
-                    if (mVirtualDisplay != null) mVirtualDisplay.release();
-                    if (mImageReader != null) mImageReader.setOnImageAvailableListener(null, null);
+                    if (virtualDisplay != null) virtualDisplay.release();
+                    if (imageReader != null) imageReader.setOnImageAvailableListener(null, null);
 
                     // re-create virtual display depending on device width / height
                     createVirtualDisplay();
@@ -147,112 +217,62 @@ public class MainActivity extends AppCompatActivity {
         @Override
         public void onStop() {
             Log.e("ScreenCapture", "stopping projection.");
-            mHandler.post(new Runnable() {
+            handler.post(new Runnable() {
                 @Override
                 public void run() {
-                    if (mVirtualDisplay != null) mVirtualDisplay.release();
-                    if (mImageReader != null) mImageReader.setOnImageAvailableListener(null, null);
-                    if (mOrientationChangeCallback != null) mOrientationChangeCallback.disable();
-                    sMediaProjection.unregisterCallback(MediaProjectionStopCallback.this);
+                    if (virtualDisplay != null) virtualDisplay.release();
+                    if (imageReader != null) imageReader.setOnImageAvailableListener(null, null);
+                    if (orientationChangeCallback != null) orientationChangeCallback.disable();
+                    mediaProjection.unregisterCallback(MediaProjectionStopCallback.this);
                 }
             });
         }
     }
 
-    /****************************************** Activity Lifecycle methods ************************/
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
-        ButterKnife.bind(this);
-
-        // call for the projection manager
-        mProjectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-
-        // start capture handling thread
-        new Thread() {
-            @Override
-            public void run() {
-                Looper.prepare();
-                mHandler = new Handler();
-                Looper.loop();
-            }
-        }.start();
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        if (!checkPermissions()) requestPermissions();
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == REQUEST_CODE) {
-            sMediaProjection = mProjectionManager.getMediaProjection(resultCode, data);
-
-            if (sMediaProjection != null) {
-
-                File storeDirectory = new File(MAIN_PATH);
-                if (!storeDirectory.exists()) {
-                    boolean success = storeDirectory.mkdirs();
-                    if (!success) {
-                        Log.e(TAG, "failed to create file storage directory.");
-                        return;
-                    }
-                    else {
-                        Log.e(TAG, "success to create file storage directory.");
-                    }
-                }
-
-                // display metrics
-                DisplayMetrics metrics = getResources().getDisplayMetrics();
-                mDensity = metrics.densityDpi;
-                mDisplay = getWindowManager().getDefaultDisplay();
-
-                // create virtual display depending on device width / height
-                createVirtualDisplay();
-
-                // register orientation change callback
-                mOrientationChangeCallback = new OrientationChangeCallback(this);
-                if (mOrientationChangeCallback.canDetectOrientation()) {
-                    mOrientationChangeCallback.enable();
-                }
-
-                // register media projection stop callback
-                sMediaProjection.registerCallback(new MediaProjectionStopCallback(), mHandler);
-            }
-        }
-    }
-
     /****************************************** UI Widget Callbacks *******************************/
     private void startProjection() {
-        startActivityForResult(mProjectionManager.createScreenCaptureIntent(), REQUEST_CODE);
+        // createScreenCaptureIntent()를 통해서 화면 캡처가 시작이 됨
+        startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_CODE);
     }
 
     private void stopProjection() {
-        mHandler.post(new Runnable() {
+        handler.post(new Runnable() {
             @Override
             public void run() {
-                if (sMediaProjection != null) {
-                    sMediaProjection.stop();
+                if (mediaProjection != null) {
+                    mediaProjection.stop();
                 }
             }
         });
     }
 
-    /****************************************** Factoring Virtual Display creation ****************/
+    /****************************************** 가상 디스플레이 만드는 부분 ****************/
     private void createVirtualDisplay() {
-        // get width and height
         Point size = new Point();
-        mDisplay.getSize(size);
-        mWidth = size.x;
-        mHeight = size.y;
+        display.getSize(size);
+        width = size.x;
+        height = size.y;
 
-        // start capture reader
-        mImageReader = ImageReader.newInstance(mWidth, mHeight, PixelFormat.RGBA_8888, 2);
-        mVirtualDisplay = sMediaProjection.createVirtualDisplay(SCREENCAP_NAME, mWidth, mHeight, mDensity, VIRTUAL_DISPLAY_FLAGS, mImageReader.getSurface(), null, mHandler);
-        mImageReader.setOnImageAvailableListener(new ImageAvailableListener(), mHandler);
+        // imageReader로부터 캡처하기 시작
+        // ImageReader newInstance (int width,
+        //      int height,
+        //      int format,
+        //      int maxImages)
+        imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
+
+        // 실제 화면캡처가 시작 되는 곳
+        // SCREENCAP_NAME = 가상디스플레이의 이름입니다. empty가 될 수 없습니다.
+        // width = 가상디스플레이의 픽셀 너비입니다. 0보다 커야됩니다.
+        // height = 가상디스플레이의 픽셀 높이입니다. 0보다 커야됩니다. (**여기서 크기를 줄이면 이미지가 줄어듭니다)
+        // density = 가상디스플레이의 밀도입니다. 0보다 커야됩니다.
+
+        // VIRTUAL_DISPLAY_FLAGS : DisplayManager의 플래그들
+        // - DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC : 가상 디스플레이를 공공의 디스플레이로 만듭니다
+        // - DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY : 자기 자신의 디스플레이 내용에 대해서만 가상 디스플레이를 만들고 VIRTUAL_DISPLAY_FLAG_PUBLIC와 함께 쓰입니다
+
+        // imageReader.getSurfacee() : imageReader 클래스가 지정한 surface를 가져옵니다
+        virtualDisplay = mediaProjection.createVirtualDisplay(SCREENCAP_NAME, width, height, density, VIRTUAL_DISPLAY_FLAGS, imageReader.getSurface(), null, handler);
+        imageReader.setOnImageAvailableListener(new ImageAvailableListener(), handler);
     }
 
     /****************************************** Permissions ***************************************/
@@ -270,7 +290,7 @@ public class MainActivity extends AppCompatActivity {
         switch(requestCode) {
             case MY_PHONE_STATE_CODE:
                 if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                    Toast.makeText(this, "Granted", Toast.LENGTH_SHORT).show();
+                    Log.e(TAG, "Granted");
                 }
                 else {
                     Log.e(TAG, "permission fail");
